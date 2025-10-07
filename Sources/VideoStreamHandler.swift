@@ -31,6 +31,10 @@ class VideoStreamHandler: NSObject {
     private var recordingURL: URL?
     private var recordingStartTime: CMTime?
     private var saveLocationURL: URL?
+    private var recordingFrameCount: Int64 = 0
+    
+    // Photo capture
+    private var latestImageBuffer: CVImageBuffer?
     
     // Frame buffer
     private var frameBuffer = Data()
@@ -241,7 +245,18 @@ class VideoStreamHandler: NSObject {
     }
     
     func startRecording() {
-        guard !isRecording else { return }
+        print("📹 startRecording() called - isRecording: \(isRecording), videoWriter: \(videoWriter != nil ? "exists" : "nil")")
+        
+        guard !isRecording else { 
+            print("⚠️ Recording already in progress")
+            return 
+        }
+        
+        // Ensure any previous writer is cleaned up
+        if videoWriter != nil {
+            print("⚠️ Previous recording still finalizing, please wait...")
+            return
+        }
         
         let basePath = saveLocationURL ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let dateFormatter = DateFormatter()
@@ -257,6 +272,11 @@ class VideoStreamHandler: NSObject {
             
             videoWriter = try AVAssetWriter(url: url, fileType: .mp4)
             
+            guard let writer = videoWriter else {
+                print("❌ Failed to create video writer")
+                return
+            }
+            
             let videoSettings: [String: Any] = [
                 AVVideoCodecKey: AVVideoCodecType.h264,
                 AVVideoWidthKey: 1280,
@@ -270,40 +290,132 @@ class VideoStreamHandler: NSObject {
             videoWriterInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
             videoWriterInput?.expectsMediaDataInRealTime = true
             
-            if let input = videoWriterInput, let writer = videoWriter {
-                if writer.canAdd(input) {
-                    writer.add(input)
-                }
-                
-                writer.startWriting()
-                writer.startSession(atSourceTime: .zero)
-                recordingStartTime = CMTime.zero
-                
-                isRecording = true
-                print("🔴 Recording started: \(filename)")
-                onRecordingStarted?(url)
+            guard let input = videoWriterInput else {
+                print("❌ Failed to create video writer input")
+                videoWriter = nil
+                return
             }
+            
+            guard writer.canAdd(input) else {
+                print("❌ Cannot add input to writer")
+                videoWriter = nil
+                videoWriterInput = nil
+                return
+            }
+            
+            writer.add(input)
+            
+            // Start writing session
+            guard writer.startWriting() else {
+                print("❌ Failed to start writing: \(writer.error?.localizedDescription ?? "unknown error")")
+                videoWriter = nil
+                videoWriterInput = nil
+                return
+            }
+            
+            writer.startSession(atSourceTime: .zero)
+            recordingStartTime = CMTime.zero
+            recordingFrameCount = 0
+            
+            // Only set recording flag after everything is successfully initialized
+            isRecording = true
+            print("🔴 Recording started: \(filename)")
+            onRecordingStarted?(url)
+            
         } catch {
             print("❌ Failed to start recording: \(error)")
             onVideoError?(error)
+            videoWriter = nil
+            videoWriterInput = nil
+            recordingURL = nil
         }
     }
     
     func stopRecording() {
-        guard isRecording, let writer = videoWriter, let url = recordingURL else { return }
+        print("⏹️ stopRecording() called - isRecording: \(isRecording), videoWriter: \(videoWriter != nil ? "exists" : "nil")")
         
-        isRecording = false
-        
-        videoWriterInput?.markAsFinished()
-        writer.finishWriting { [weak self] in
-            print("⏹ Recording stopped: \(url.lastPathComponent)")
-            self?.onRecordingStopped?(url)
+        guard isRecording, let writer = videoWriter, let url = recordingURL else { 
+            print("⏹️ stopRecording() guard failed - isRecording: \(isRecording), writer exists: \(videoWriter != nil), url exists: \(recordingURL != nil)")
+            return 
         }
         
-        videoWriter = nil
-        videoWriterInput = nil
-        recordingURL = nil
-        recordingStartTime = nil
+        print("⏹️ Stopping recording, setting isRecording = false")
+        // Set flag to false immediately to prevent new frames from being written
+        isRecording = false
+        
+        // Mark input as finished
+        videoWriterInput?.markAsFinished()
+        
+        // Finish writing asynchronously
+        writer.finishWriting { [weak self] in
+            guard let self = self else { return }
+            
+            if writer.status == .completed {
+                print("⏹ Recording stopped: \(url.lastPathComponent)")
+                print("📊 Total frames recorded: \(self.recordingFrameCount)")
+                self.onRecordingStopped?(url)
+            } else if writer.status == .failed {
+                print("❌ Recording failed: \(writer.error?.localizedDescription ?? "unknown error")")
+                if let error = writer.error {
+                    self.onVideoError?(error)
+                }
+            } else {
+                print("⚠️ Recording stopped with status: \(writer.status.rawValue)")
+            }
+            
+            // Clean up after writing is complete
+            DispatchQueue.main.async {
+                self.videoWriter = nil
+                self.videoWriterInput = nil
+                self.recordingURL = nil
+                self.recordingStartTime = nil
+                self.recordingFrameCount = 0
+            }
+        }
+    }
+    
+    // MARK: - Photo Capture
+    
+    func capturePhoto() -> URL? {
+        guard let imageBuffer = latestImageBuffer else {
+            print("❌ No frame available for photo capture")
+            return nil
+        }
+        
+        // Create CGImage from CVImageBuffer
+        let ciImage = CIImage(cvImageBuffer: imageBuffer)
+        let context = CIContext()
+        
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+            print("❌ Failed to create CGImage from frame")
+            return nil
+        }
+        
+        // Create NSBitmapImageRep
+        let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
+        bitmapRep.size = NSSize(width: cgImage.width, height: cgImage.height)
+        
+        guard let jpegData = bitmapRep.representation(using: .jpeg, properties: [.compressionFactor: 0.9]) else {
+            print("❌ Failed to create JPEG data")
+            return nil
+        }
+        
+        // Save to Documents directory
+        let basePath = saveLocationURL ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyyMMdd_HHmmss"
+        let timestamp = dateFormatter.string(from: Date())
+        let filename = "ARDrone_Photo_\(timestamp).jpg"
+        let photoURL = basePath.appendingPathComponent(filename)
+        
+        do {
+            try jpegData.write(to: photoURL)
+            print("📸 Photo saved: \(filename)")
+            return photoURL
+        } catch {
+            print("❌ Failed to save photo: \(error)")
+            return nil
+        }
     }
     
     // MARK: - Statistics
@@ -855,6 +967,9 @@ private func decompressionCallback(
 extension VideoStreamHandler {
     
     fileprivate func displayFrame(imageBuffer: CVImageBuffer, presentationTime: CMTime) {
+        // Store the latest frame for photo capture
+        latestImageBuffer = imageBuffer
+        
         guard let displayLayer = displayLayer else {
             return
         }
@@ -894,6 +1009,47 @@ extension VideoStreamHandler {
         
         guard sampleStatus == noErr, let sample = sampleBuffer else {
             return
+        }
+        
+        // Write to video file if recording
+        if isRecording, let input = videoWriterInput, let writer = videoWriter {
+            // Check writer status before attempting to write
+            guard writer.status == .writing else {
+                if writer.status == .failed {
+                    print("❌ Writer failed: \(writer.error?.localizedDescription ?? "unknown")")
+                }
+                return
+            }
+            
+            if input.isReadyForMoreMediaData {
+                let recordingTime = CMTime(value: recordingFrameCount, timescale: 30)
+                
+                // Create sample buffer with proper recording timestamp
+                var recordingTimingInfo = CMSampleTimingInfo(
+                    duration: CMTime(value: 1, timescale: 30),
+                    presentationTimeStamp: recordingTime,
+                    decodeTimeStamp: .invalid
+                )
+                
+                var recordingSampleBuffer: CMSampleBuffer?
+                let recordingSampleStatus = CMSampleBufferCreateReadyWithImageBuffer(
+                    allocator: kCFAllocatorDefault,
+                    imageBuffer: imageBuffer,
+                    formatDescription: formatDesc,
+                    sampleTiming: &recordingTimingInfo,
+                    sampleBufferOut: &recordingSampleBuffer
+                )
+                
+                if recordingSampleStatus == noErr, let recordingSample = recordingSampleBuffer {
+                    if input.append(recordingSample) {
+                        recordingFrameCount += 1
+                    } else {
+                        print("⚠️ Failed to append frame to recording")
+                    }
+                } else {
+                    print("⚠️ Failed to create recording sample buffer: \(recordingSampleStatus)")
+                }
+            }
         }
         
         // Display on main thread

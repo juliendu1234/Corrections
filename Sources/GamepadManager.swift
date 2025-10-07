@@ -296,19 +296,33 @@ class GamepadManager {
         
         // D-PAD LEFT - ENREGISTRER VIDÉO
         gamepad.dpad.left.pressedChangedHandler = { [weak self] (button, value, pressed) in
+            guard let self = self else { return }
+            
             if pressed {
-                if self?.droneController.videoHandler.isRecording == true {
-                    self?.droneController.stopVideoRecording()
+                // Capture the current state at the moment of button press
+                let wasRecording = self.droneController.videoHandler.isRecording
+                print("🎮 D-PAD LEFT pressed - Current recording state: \(wasRecording)")
+                
+                if wasRecording {
+                    print("🎮 → Stopping recording")
+                    self.droneController.stopVideoRecording()
                 } else {
-                    self?.droneController.startVideoRecording()
+                    print("🎮 → Starting recording")
+                    self.droneController.startVideoRecording()
                 }
             }
         }
         
         // D-PAD RIGHT - PRENDRE PHOTO
         gamepad.dpad.right.pressedChangedHandler = { [weak self] (button, value, pressed) in
+            guard let self = self else { return }
+            
             if pressed {
-                _ = self?.droneController.capturePhoto()
+                print("🎮 D-PAD RIGHT pressed - Taking photo")
+                let success = self.droneController.capturePhoto()
+                if !success {
+                    print("⚠️ Photo capture returned false")
+                }
             }
         }
         
