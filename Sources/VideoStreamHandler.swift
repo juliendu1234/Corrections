@@ -245,6 +245,8 @@ class VideoStreamHandler: NSObject {
     }
     
     func startRecording() {
+        print("📹 startRecording() called - isRecording: \(isRecording), videoWriter: \(videoWriter != nil ? "exists" : "nil")")
+        
         guard !isRecording else { 
             print("⚠️ Recording already in progress")
             return 
@@ -330,8 +332,14 @@ class VideoStreamHandler: NSObject {
     }
     
     func stopRecording() {
-        guard isRecording, let writer = videoWriter, let url = recordingURL else { return }
+        print("⏹️ stopRecording() called - isRecording: \(isRecording), videoWriter: \(videoWriter != nil ? "exists" : "nil")")
         
+        guard isRecording, let writer = videoWriter, let url = recordingURL else { 
+            print("⏹️ stopRecording() guard failed - isRecording: \(isRecording), writer exists: \(videoWriter != nil), url exists: \(recordingURL != nil)")
+            return 
+        }
+        
+        print("⏹️ Stopping recording, setting isRecording = false")
         // Set flag to false immediately to prevent new frames from being written
         isRecording = false
         
