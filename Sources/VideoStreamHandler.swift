@@ -26,6 +26,7 @@ class VideoStreamHandler: NSObject {
     
     // Video recording
     private(set) var isRecording = false
+    private var isFinalizing = false
     private var videoWriter: AVAssetWriter?
     private var videoWriterInput: AVAssetWriterInput?
     private var recordingURL: URL?
@@ -250,6 +251,12 @@ class VideoStreamHandler: NSObject {
             return 
         }
         
+        // Ensure we're not in the middle of finalizing a previous recording
+        guard !isFinalizing else {
+            print("⚠️ Previous recording still finalizing, please wait...")
+            return
+        }
+        
         // Ensure any previous writer is cleaned up
         if videoWriter != nil {
             print("⚠️ Previous recording still finalizing, please wait...")
@@ -334,6 +341,7 @@ class VideoStreamHandler: NSObject {
         
         // Set flag to false immediately to prevent new frames from being written
         isRecording = false
+        isFinalizing = true
         
         // Mark input as finished
         videoWriterInput?.markAsFinished()
@@ -362,6 +370,7 @@ class VideoStreamHandler: NSObject {
                 self.recordingURL = nil
                 self.recordingStartTime = nil
                 self.recordingFrameCount = 0
+                self.isFinalizing = false  // Clear finalizing flag last
             }
         }
     }
