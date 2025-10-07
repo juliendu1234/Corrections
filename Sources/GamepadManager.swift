@@ -28,6 +28,10 @@ class GamepadManager {
     private var l2WasAboveThreshold = false
     private var r2WasAboveThreshold = false
     
+    // Recording button debounce
+    private var lastRecordingButtonPressTime: Date?
+    private let recordingButtonDebounceInterval: TimeInterval = 1.0
+    
     // NOUVEAU : IOHIDManager pour monitoring global
     private var hidManager: IOHIDManager?
     private var isGlobalMonitoringActive = false
@@ -296,11 +300,25 @@ class GamepadManager {
         
         // D-PAD LEFT - ENREGISTRER VIDÉO
         gamepad.dpad.left.pressedChangedHandler = { [weak self] (button, value, pressed) in
+            guard let self = self else { return }
+            
             if pressed {
-                if self?.droneController.videoHandler.isRecording == true {
-                    self?.droneController.stopVideoRecording()
+                // Debounce: Ignore if pressed too recently
+                let now = Date()
+                if let lastPress = self.lastRecordingButtonPressTime {
+                    let timeSinceLastPress = now.timeIntervalSince(lastPress)
+                    if timeSinceLastPress < self.recordingButtonDebounceInterval {
+                        print("⚠️ Recording button press ignored (debounce: \(String(format: "%.2f", timeSinceLastPress))s)")
+                        return
+                    }
+                }
+                
+                self.lastRecordingButtonPressTime = now
+                
+                if self.droneController.videoHandler.isRecording == true {
+                    self.droneController.stopVideoRecording()
                 } else {
-                    self?.droneController.startVideoRecording()
+                    self.droneController.startVideoRecording()
                 }
             }
         }
