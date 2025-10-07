@@ -719,8 +719,14 @@ class ARDroneController {
     
     func capturePhoto() -> Bool {
         guard currentNavData != nil else { return false }
-        print("📸 Photo capture")
-        return true
+        
+        if let photoURL = videoHandler.capturePhoto() {
+            print("📸 Photo captured successfully: \(photoURL.lastPathComponent)")
+            return true
+        } else {
+            print("❌ Photo capture failed")
+            return false
+        }
     }
     
     func switchVideoChannel(_ channel: ATCommands.VideoChannel) {

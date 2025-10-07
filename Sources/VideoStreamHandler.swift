@@ -31,6 +31,10 @@ class VideoStreamHandler: NSObject {
     private var recordingURL: URL?
     private var recordingStartTime: CMTime?
     private var saveLocationURL: URL?
+    private var recordingFrameCount: Int64 = 0
+    
+    // Photo capture
+    private var latestImageBuffer: CVImageBuffer?
     
     // Frame buffer
     private var frameBuffer = Data()
@@ -297,6 +301,7 @@ class VideoStreamHandler: NSObject {
         videoWriterInput?.markAsFinished()
         writer.finishWriting { [weak self] in
             print("⏹ Recording stopped: \(url.lastPathComponent)")
+            print("📊 Total frames recorded: \(self?.recordingFrameCount ?? 0)")
             self?.onRecordingStopped?(url)
         }
         
@@ -304,6 +309,51 @@ class VideoStreamHandler: NSObject {
         videoWriterInput = nil
         recordingURL = nil
         recordingStartTime = nil
+        recordingFrameCount = 0
+    }
+    
+    // MARK: - Photo Capture
+    
+    func capturePhoto() -> URL? {
+        guard let imageBuffer = latestImageBuffer else {
+            print("❌ No frame available for photo capture")
+            return nil
+        }
+        
+        // Create CGImage from CVImageBuffer
+        let ciImage = CIImage(cvImageBuffer: imageBuffer)
+        let context = CIContext()
+        
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+            print("❌ Failed to create CGImage from frame")
+            return nil
+        }
+        
+        // Create NSBitmapImageRep
+        let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
+        bitmapRep.size = NSSize(width: cgImage.width, height: cgImage.height)
+        
+        guard let jpegData = bitmapRep.representation(using: .jpeg, properties: [.compressionFactor: 0.9]) else {
+            print("❌ Failed to create JPEG data")
+            return nil
+        }
+        
+        // Save to Documents directory
+        let basePath = saveLocationURL ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyyMMdd_HHmmss"
+        let timestamp = dateFormatter.string(from: Date())
+        let filename = "ARDrone_Photo_\(timestamp).jpg"
+        let photoURL = basePath.appendingPathComponent(filename)
+        
+        do {
+            try jpegData.write(to: photoURL)
+            print("📸 Photo saved: \(filename)")
+            return photoURL
+        } catch {
+            print("❌ Failed to save photo: \(error)")
+            return nil
+        }
     }
     
     // MARK: - Statistics
@@ -855,6 +905,9 @@ private func decompressionCallback(
 extension VideoStreamHandler {
     
     fileprivate func displayFrame(imageBuffer: CVImageBuffer, presentationTime: CMTime) {
+        // Store the latest frame for photo capture
+        latestImageBuffer = imageBuffer
+        
         guard let displayLayer = displayLayer else {
             return
         }
@@ -894,6 +947,35 @@ extension VideoStreamHandler {
         
         guard sampleStatus == noErr, let sample = sampleBuffer else {
             return
+        }
+        
+        // Write to video file if recording
+        if isRecording, let input = videoWriterInput, let writer = videoWriter {
+            if input.isReadyForMoreMediaData && writer.status == .writing {
+                let recordingTime = CMTime(value: recordingFrameCount, timescale: 30)
+                
+                // Create sample buffer with proper recording timestamp
+                var recordingTimingInfo = CMSampleTimingInfo(
+                    duration: CMTime(value: 1, timescale: 30),
+                    presentationTimeStamp: recordingTime,
+                    decodeTimeStamp: .invalid
+                )
+                
+                var recordingSampleBuffer: CMSampleBuffer?
+                let recordingSampleStatus = CMSampleBufferCreateReadyWithImageBuffer(
+                    allocator: kCFAllocatorDefault,
+                    imageBuffer: imageBuffer,
+                    formatDescription: formatDesc,
+                    sampleTiming: &recordingTimingInfo,
+                    sampleBufferOut: &recordingSampleBuffer
+                )
+                
+                if recordingSampleStatus == noErr, let recordingSample = recordingSampleBuffer {
+                    if input.append(recordingSample) {
+                        recordingFrameCount += 1
+                    }
+                }
+            }
         }
         
         // Display on main thread
