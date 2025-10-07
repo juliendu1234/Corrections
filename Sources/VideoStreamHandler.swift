@@ -245,7 +245,16 @@ class VideoStreamHandler: NSObject {
     }
     
     func startRecording() {
-        guard !isRecording else { return }
+        guard !isRecording else { 
+            print("⚠️ Recording already in progress")
+            return 
+        }
+        
+        // Ensure any previous writer is cleaned up
+        if videoWriter != nil {
+            print("⚠️ Previous recording still finalizing, please wait...")
+            return
+        }
         
         let basePath = saveLocationURL ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let dateFormatter = DateFormatter()
@@ -261,6 +270,11 @@ class VideoStreamHandler: NSObject {
             
             videoWriter = try AVAssetWriter(url: url, fileType: .mp4)
             
+            guard let writer = videoWriter else {
+                print("❌ Failed to create video writer")
+                return
+            }
+            
             let videoSettings: [String: Any] = [
                 AVVideoCodecKey: AVVideoCodecType.h264,
                 AVVideoWidthKey: 1280,
@@ -274,42 +288,82 @@ class VideoStreamHandler: NSObject {
             videoWriterInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
             videoWriterInput?.expectsMediaDataInRealTime = true
             
-            if let input = videoWriterInput, let writer = videoWriter {
-                if writer.canAdd(input) {
-                    writer.add(input)
-                }
-                
-                writer.startWriting()
-                writer.startSession(atSourceTime: .zero)
-                recordingStartTime = CMTime.zero
-                
-                isRecording = true
-                print("🔴 Recording started: \(filename)")
-                onRecordingStarted?(url)
+            guard let input = videoWriterInput else {
+                print("❌ Failed to create video writer input")
+                videoWriter = nil
+                return
             }
+            
+            guard writer.canAdd(input) else {
+                print("❌ Cannot add input to writer")
+                videoWriter = nil
+                videoWriterInput = nil
+                return
+            }
+            
+            writer.add(input)
+            
+            // Start writing session
+            guard writer.startWriting() else {
+                print("❌ Failed to start writing: \(writer.error?.localizedDescription ?? "unknown error")")
+                videoWriter = nil
+                videoWriterInput = nil
+                return
+            }
+            
+            writer.startSession(atSourceTime: .zero)
+            recordingStartTime = CMTime.zero
+            recordingFrameCount = 0
+            
+            // Only set recording flag after everything is successfully initialized
+            isRecording = true
+            print("🔴 Recording started: \(filename)")
+            onRecordingStarted?(url)
+            
         } catch {
             print("❌ Failed to start recording: \(error)")
             onVideoError?(error)
+            videoWriter = nil
+            videoWriterInput = nil
+            recordingURL = nil
         }
     }
     
     func stopRecording() {
         guard isRecording, let writer = videoWriter, let url = recordingURL else { return }
         
+        // Set flag to false immediately to prevent new frames from being written
         isRecording = false
         
+        // Mark input as finished
         videoWriterInput?.markAsFinished()
-        writer.finishWriting { [weak self] in
-            print("⏹ Recording stopped: \(url.lastPathComponent)")
-            print("📊 Total frames recorded: \(self?.recordingFrameCount ?? 0)")
-            self?.onRecordingStopped?(url)
-        }
         
-        videoWriter = nil
-        videoWriterInput = nil
-        recordingURL = nil
-        recordingStartTime = nil
-        recordingFrameCount = 0
+        // Finish writing asynchronously
+        writer.finishWriting { [weak self] in
+            guard let self = self else { return }
+            
+            if writer.status == .completed {
+                print("⏹ Recording stopped: \(url.lastPathComponent)")
+                print("📊 Total frames recorded: \(self.recordingFrameCount)")
+                self.onRecordingStopped?(url)
+            } else if writer.status == .failed {
+                print("❌ Recording failed: \(writer.error?.localizedDescription ?? "unknown error")")
+                if let error = writer.error {
+                    self.onVideoError?(error)
+                }
+            } else {
+                print("⚠️ Recording stopped with status: \(writer.status.rawValue)")
+            }
+            
+            // Clean up after writing is complete
+            DispatchQueue.main.async {
+                self.videoWriter = nil
+                self.videoWriterInput = nil
+                self.recordingURL = nil
+                self.recordingStartTime = nil
+                self.recordingFrameCount = 0
+            }
+        }
     }
     
     // MARK: - Photo Capture
@@ -951,7 +1005,15 @@ extension VideoStreamHandler {
         
         // Write to video file if recording
         if isRecording, let input = videoWriterInput, let writer = videoWriter {
-            if input.isReadyForMoreMediaData && writer.status == .writing {
+            // Check writer status before attempting to write
+            guard writer.status == .writing else {
+                if writer.status == .failed {
+                    print("❌ Writer failed: \(writer.error?.localizedDescription ?? "unknown")")
+                }
+                return
+            }
+            
+            if input.isReadyForMoreMediaData {
                 let recordingTime = CMTime(value: recordingFrameCount, timescale: 30)
                 
                 // Create sample buffer with proper recording timestamp
@@ -973,7 +1035,11 @@ extension VideoStreamHandler {
                 if recordingSampleStatus == noErr, let recordingSample = recordingSampleBuffer {
                     if input.append(recordingSample) {
                         recordingFrameCount += 1
+                    } else {
+                        print("⚠️ Failed to append frame to recording")
                     }
+                } else {
+                    print("⚠️ Failed to create recording sample buffer: \(recordingSampleStatus)")
                 }
             }
         }
